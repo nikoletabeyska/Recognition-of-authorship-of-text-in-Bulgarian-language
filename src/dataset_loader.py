@@ -100,7 +100,10 @@ def main():
     loader.load_test()
     
     print("\nAuthors:", loader.get_author_list())
-    print("\nSample train data:\n", loader.get_raw_data('train').head())
+ 
+    train_data = loader.get_raw_data('train')
+    print(train_data.head())
+    print(train_data.head()['text'])
 
 if __name__ == "__main__":
     main()
