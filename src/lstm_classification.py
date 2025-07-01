@@ -1,5 +1,5 @@
 from dataset_loader import TextDataLoader
-import gensim.downloader as api
+import fasttext
 import numpy as np
 import optuna
 import os
@@ -168,18 +168,17 @@ class LSTMClassifier:
 
     def load_pretrained_embeddings(self, texts: List[str]) -> None:
         """
-        Load pre-trained FastText embeddings for vocabulary.
-
+        Load pre-trained Bulgarian FastText embeddings for vocabulary.
+        
         Parameters:
             texts (List[str]): List of texts to build vocabulary from.
         """
         print("Loading pre-trained Bulgarian FastText embeddings...")
 
-        # Multilingual model that includes Bulgarian
-        model_name = 'fasttext-wiki-news-subwords-300'
-        words_vectors = api.load(model_name)
+        model_path = 'cc.bg.300.bin/cc.bg.300.bin'
+        words_vectors = fasttext.load_model(model_path)
         embedding_dim = 300
-        print("FastText embeddings are loaded successfully")
+        print("Bulgarian FastText embeddings loaded successfully")
 
         vocabulary = set()
         for text in texts:
@@ -200,11 +199,8 @@ class LSTMClassifier:
             if word in ['<PAD>', '<UNK>']:
                 continue
             try:
-                if word in words_vectors:
-                    self.embedding_matrix[index] = torch.tensor(words_vectors[word])
-                    found_words += 1
-                else:
-                    self.embedding_matrix[index] = torch.randn(embedding_dim) * 0.1
+                self.embedding_matrix[index] = torch.tensor(words_vectors.get_word_vector(word))
+                found_words += 1
             except:
                 self.embedding_matrix[index] = torch.randn(embedding_dim) * 0.1
         print(f"Found pre-trained embeddings for {found_words}/{len(self.word_to_index)} words. The other embeddings are randomly initialized.")
@@ -582,7 +578,8 @@ def main():
     os.system("pip install wandb")
     print("Please run '!wandb login' in a Colab cell and paste your W&B API key when prompted.")
     
-    DATA_DIR = 'Recognition-of-authorship-of-text-in-Bulgarian-language/data'
+    # DATA_DIR = 'Recognition-of-authorship-of-text-in-Bulgarian-language/data'
+    DATA_DIR = 'data'
     data_loader = TextDataLoader(DATA_DIR)
 
     lstm_classifier = LSTMClassifier(data_loader)
