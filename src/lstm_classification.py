@@ -2,8 +2,9 @@ from dataset_loader import TextDataLoader
 import gensim.downloader as api
 import numpy as np
 import optuna
+import os
 import re
-from sklearn.metrics import accuracy_score, classification_report
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import LabelEncoder
 import torch
@@ -11,6 +12,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 from typing import List, Tuple, Dict
+import wandb
 
 
 class TextDataset(Dataset):    
@@ -251,6 +253,8 @@ class LSTMClassifier:
             val_labels (List[int]): Validation labels.
             params (dict): Hyperparameters for training.
         """
+        wandb.init(project="lstm-classifier", config=params)
+        
         train_dataset = TextDataset(train_texts, train_labels, self.word_to_index, params['max_length'])
         val_dataset = TextDataset(val_texts, val_labels, self.word_to_index, params['max_length'])
 
@@ -284,6 +288,8 @@ class LSTMClassifier:
         for epoch in range(params['epochs']):
             model.train()
             train_loss = 0.0
+            train_correct = 0
+            train_total = 0
             
             for batch_texts, batch_labels in train_loader:
                 batch_texts, batch_labels = batch_texts.to(self.device), batch_labels.to(self.device)
@@ -296,6 +302,12 @@ class LSTMClassifier:
                 optimizer.step()
 
                 train_loss += loss.item()
+                _, predicted = torch.max(outputs.data, 1)
+                train_total += batch_labels.size(0)
+                train_correct = (predicted == batch_labels).sum().item()
+
+            train_loss = train_loss / len(train_loader)
+            train_accuracy = train_correct / train_total
 
             # Validation
             model.eval()
@@ -313,6 +325,13 @@ class LSTMClassifier:
             val_accuracy = validation_correct / validation_total
             scheduler.step(val_accuracy)
 
+            wandb.log({
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "train_accuracy": train_accuracy,
+                "validation_accuracy": val_accuracy
+            })
+
             # Early stopping
             if val_accuracy > best_val_acc:
                 best_val_acc = val_accuracy
@@ -323,6 +342,8 @@ class LSTMClassifier:
             if patience_counter >= patience:
                 break
 
+        wandb.finish()
+        
         return best_val_acc
 
     def objective(self, trial) -> float:
@@ -353,7 +374,7 @@ class LSTMClassifier:
         all_labels = np.array(list(train_labels) + list(val_labels))
 
         cross_validation_scores = []
-        stratified_k_fold = StratifiedKFold(n_splits=3, shuffle=True, random_state=0)
+        stratified_k_fold = StratifiedKFold(n_splits=5, shuffle=True, random_state=0)
 
         for train_index, validation_index in stratified_k_fold.split(all_texts, all_labels):
             cv_train_texts = all_texts[train_index].tolist()
@@ -366,7 +387,7 @@ class LSTMClassifier:
 
         return np.mean(cross_validation_scores)
 
-    def optimize_hyperparameters(self, trials_count: int = 20) -> dict:
+    def optimize_hyperparameters(self, trials_count: int = 15) -> dict:
         """
         Optimize hyperparameters using Optuna.
 
@@ -382,7 +403,7 @@ class LSTMClassifier:
         print(f"Best parameters: {study.best_trial.params}")
 
         self.best_params = study.best_trial.params
-        self.best_params['epochs'] = 25
+        self.best_params['epochs'] = 30
 
         return self.best_params
 
@@ -409,18 +430,16 @@ class LSTMClassifier:
                 'batch_size': 16,
                 'max_length': 1000,
                 'weight_decay': 0.01,
-                'epochs': 25
+                'epochs': 30
             }
 
-        self.train(train_texts, train_labels, val_texts, val_labels, self.best_params)
+        wandb.init(project="lstm-classifier-final", config=self.best_params)
 
         train_dataset = TextDataset(train_texts, train_labels, self.word_to_index, self.best_params['max_length'])
+        train_loader = DataLoader(train_dataset, batch_size=self.best_params['batch_size'], shuffle=True)
+        
         val_dataset = TextDataset(val_texts, val_labels, self.word_to_index, self.best_params['max_length'])
-
-        train_and_val_texts = train_texts + val_texts
-        train_and_val_labels = list(train_labels) + list(val_labels)
-        train_and_val_dataset = TextDataset(train_and_val_texts, train_and_val_labels, self.word_to_index, self.best_params['max_length'])
-        train_and_val_loader = DataLoader(train_and_val_dataset, batch_size=self.best_params['batch_size'], shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=self.best_params['batch_size'], shuffle=False)
 
         final_model = LSTMModel(
             vocab_size=len(self.word_to_index),
@@ -432,7 +451,7 @@ class LSTMClassifier:
             embedding_matrix=self.embedding_matrix
         ).to(self.device)
 
-        class_counts = np.bincount(train_and_val_labels)
+        class_counts = np.bincount(train_labels)
         class_weights = 1.0 / class_counts
         class_weights = class_weights / class_weights.sum() * len(class_weights)
         criterion = nn.CrossEntropyLoss(weight=torch.FloatTensor(class_weights).to(self.device))
@@ -442,10 +461,19 @@ class LSTMClassifier:
             lr=self.best_params['learning_rate'], 
             weight_decay=self.best_params['weight_decay']
         )
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.7, patience=2)
+
+        best_val_acc = 0.0
+        patience_counter = 0
+        patience = 5
 
         final_model.train()
         for epoch in range(self.best_params['epochs']):
-            for batch_texts, batch_labels in train_and_val_loader:
+            train_loss = 0.0
+            train_correct = 0
+            train_total = 0
+            
+            for batch_texts, batch_labels in train_loader:
                 batch_texts, batch_labels = batch_texts.to(self.device), batch_labels.to(self.device)
 
                 optimizer.zero_grad()
@@ -455,6 +483,54 @@ class LSTMClassifier:
                 torch.nn.utils.clip_grad_norm_(final_model.parameters(), max_norm=1.0)
                 optimizer.step()
 
+                train_loss += loss.item()
+                _, predicted = torch.max(outputs.data, 1)
+                train_total += batch_labels.size(0)
+                train_correct += (predicted == batch_labels).sum().item()
+
+            train_loss = train_loss / len(train_loader)
+            train_accuracy = train_correct / train_total
+
+            # Validation
+            final_model.eval()
+            validation_correct = 0
+            validation_total = 0
+            
+            with torch.no_grad():
+                for batch_texts, batch_labels in val_loader:
+                    batch_texts, batch_labels = batch_texts.to(self.device), batch_labels.to(self.device)
+                    outputs = final_model(batch_texts)
+                    _, predicted = torch.max(outputs.data, 1)
+                    validation_total += batch_labels.size(0)
+                    validation_correct += (predicted == batch_labels).sum().item()
+
+            val_accuracy = validation_correct / validation_total
+            scheduler.step(val_accuracy)
+
+            # Log metrics to W&B
+            wandb.log({
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "train_accuracy": train_accuracy,
+                "validation_accuracy": val_accuracy
+            })
+
+            # Early stopping based on validation accuracy
+            if val_accuracy > best_val_acc:
+                best_val_acc = val_accuracy
+                patience_counter = 0
+            else:
+                patience_counter += 1
+
+            if patience_counter >= patience:
+                print(f"Early stopping triggered at epoch {epoch + 1}")
+                break
+
+            final_model.train()  # Switch back to training mode for next epoch
+
+        # Finish the W&B run
+        wandb.finish()
+        
         return final_model
 
     def predict_and_evaluate(self, model: nn.Module, test_texts: List[str], test_labels: List[int]) -> Tuple[float, str]:
@@ -486,10 +562,26 @@ class LSTMClassifier:
         report = classification_report(all_labels, all_predictions, 
                                         target_names=self.label_encoder.classes_, zero_division=0)
 
+        wandb.init(project="lstm-classifier-test")
+        wandb.log({"test_accuracy": accuracy})
+        cm = confusion_matrix(all_labels, all_predictions)
+        wandb.log({
+            "confusion_matrix": wandb.plot.confusion_matrix(
+                probs=None,
+                y_true=all_labels,
+                preds=all_predictions,
+                class_names=self.label_encoder.classes_
+            )
+        })
+        wandb.finish()
+
         return accuracy, report
 
 
 def main():
+    os.system("pip install wandb")
+    print("Please run '!wandb login' in a Colab cell and paste your W&B API key when prompted.")
+    
     DATA_DIR = 'Recognition-of-authorship-of-text-in-Bulgarian-language/data'
     data_loader = TextDataLoader(DATA_DIR)
 
@@ -500,7 +592,7 @@ def main():
     lstm_classifier.load_pretrained_embeddings(train_texts + val_texts + test_texts)
 
     optimize = True
-    trials_count = 15
+    trials_count = 30
     if optimize:
         lstm_classifier.optimize_hyperparameters(trials_count)
 
