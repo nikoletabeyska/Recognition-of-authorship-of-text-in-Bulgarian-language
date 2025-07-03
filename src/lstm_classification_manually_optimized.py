@@ -1,8 +1,10 @@
 from dataset_loader import TextDataLoader
 import fasttext
+import matplotlib.pyplot as plt
 import numpy as np
 import os
 import re
+import seaborn as sns
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 from sklearn.preprocessing import LabelEncoder
 import torch
@@ -145,7 +147,7 @@ class LSTMClassifier:
         self.embedding_matrix = None
         self.authors = None
         
-        # Moast of the hyperparameters are taken from the best run with Optuna and Cross-Validation
+        # Most of the hyperparameters are taken from the best run with Optuna and Cross-Validation
         self.best_params = {
             'batch_size': 16,
             'dropout': 0.5, # Changed from 0.31848438034467685
@@ -389,15 +391,19 @@ class LSTMClassifier:
 
         wandb.init(project="lstm-classifier-test")
         wandb.log({"test_accuracy": accuracy})
+
         cm = confusion_matrix(all_labels, all_predictions)
-        wandb.log({
-            "confusion_matrix": wandb.plot.confusion_matrix(
-                probs=None,
-                y_true=all_labels,
-                preds=all_predictions,
-                class_names=self.label_encoder.classes_
-            )
-        })
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+                    xticklabels=self.label_encoder.classes_, 
+                    yticklabels=self.label_encoder.classes_)
+        plt.title('Confusion Matrix')
+        plt.ylabel('True Label')
+        plt.xlabel('Predicted Label')
+        plt.tight_layout()
+        plt.savefig('confusion_matrix.png')
+        plt.close()
+
         wandb.finish()
 
         return accuracy, report
